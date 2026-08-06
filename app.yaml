@@ -1,0 +1,5 @@
+command: ["node", "dist/index.js", "-v", "--http", "DATABRICKS_APP_PORT"]
+
+env:
+  - name: "NODE_ENV"
+    value: "production"

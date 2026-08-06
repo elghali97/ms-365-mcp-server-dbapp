@@ -44,7 +44,18 @@ function parseHttpOption(httpOption: string | boolean): { host: string | undefin
     return { host: undefined, port: 3000 };
   }
 
-  const httpString = httpOption.trim();
+  let httpString = httpOption.trim();
+
+  // Databricks Apps inject the runtime port via the DATABRICKS_APP_PORT env var and
+  // are supposed to substitute the literal token in the command array — but that
+  // substitution is unreliable (the token can reach the process verbatim). When we
+  // receive the literal token (or the "host:DATABRICKS_APP_PORT" form), resolve the
+  // real port from the environment so the server binds where the platform proxy
+  // forwards. Falls back to 3000 only if the env var is unset.
+  if (httpString.includes('DATABRICKS_APP_PORT')) {
+    const injectedPort = process.env.DATABRICKS_APP_PORT?.trim();
+    httpString = httpString.replace('DATABRICKS_APP_PORT', injectedPort || '3000');
+  }
 
   // Check if it contains a colon (host:port format)
   if (httpString.includes(':')) {
