@@ -298,7 +298,13 @@ class MicrosoftGraphServer {
         })
       );
 
-      app.use(express.json());
+      // Parse JSON bodies. `type: () => true` makes the parser run regardless of the
+      // request Content-Type. The Databricks Apps gateway (and some MCP clients) forward
+      // the JSON-RPC initialize body without a strict `application/json` Content-Type; with
+      // the default type matcher express.json() would skip parsing, leaving req.body empty
+      // and the MCP transport would reject it with "-32700 Parse error: Invalid JSON". An
+      // empty/GET body still yields {} here, which is harmless.
+      app.use(express.json({ type: () => true }));
       app.use(express.urlencoded({ extended: true }));
 
       // Add CORS headers for all routes
@@ -742,8 +748,13 @@ class MicrosoftGraphServer {
         publicUrl: publicBase,
         ucMode: Boolean(this.ucConnection),
       });
+      // Serve the MCP endpoint on both /mcp (direct clients) and /mcp/mcp. When a
+      // Databricks App is registered as a custom MCP server, the platform appends
+      // /mcp to the app's configured MCP path and POSTs to /mcp/mcp; without this
+      // alias that request 404s with an HTML body the MCP client cannot parse.
+      const mcpPaths = ['/mcp', '/mcp/mcp'];
       app.get(
-        '/mcp',
+        mcpPaths,
         mcpAuth,
         async (req: Request & { microsoftAuth?: { accessToken: string } }, res: Response) => {
           const handler = async () => {
@@ -788,7 +799,7 @@ class MicrosoftGraphServer {
       );
 
       app.post(
-        '/mcp',
+        mcpPaths,
         mcpAuth,
         async (req: Request & { microsoftAuth?: { accessToken: string } }, res: Response) => {
           const handler = async () => {
