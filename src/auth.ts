@@ -598,6 +598,11 @@ class AuthManager {
   private tokenExpiry: number | null;
   private oauthToken: string | null;
   private isOAuthMode: boolean;
+  // Unity Catalog HTTP connection proxy mode. Like OAuth/HTTP bearer mode, the
+  // server does not manage Microsoft tokens and cannot switch cached accounts —
+  // the request identity (a Databricks user token) drives token selection. Set by
+  // the server when MS365_MCP_UC_CONNECTION is configured.
+  private ucProxyMode: boolean;
   private selectedAccountId: string | null;
   private useInteractiveAuth: boolean;
   private expectedUsername: string | null;
@@ -635,6 +640,7 @@ class AuthManager {
     const oauthTokenFromEnv = process.env.MS365_MCP_OAUTH_TOKEN;
     this.oauthToken = oauthTokenFromEnv ?? null;
     this.isOAuthMode = oauthTokenFromEnv != null;
+    this.ucProxyMode = false;
   }
 
   /**
@@ -1145,11 +1151,21 @@ class AuthManager {
   }
 
   /**
-   * Returns true if auth is in OAuth/HTTP mode (token supplied via env or setOAuthToken).
-   * In this mode, account resolution should be skipped — the request context drives token selection.
+   * Returns true if auth is in OAuth/HTTP mode (token supplied via env or setOAuthToken)
+   * or Unity Catalog proxy mode. In either mode the server does not manage Microsoft
+   * tokens: account resolution is skipped and the request context drives token selection.
    */
   isOAuthModeEnabled(): boolean {
-    return this.isOAuthMode;
+    return this.isOAuthMode || this.ucProxyMode;
+  }
+
+  /**
+   * Enables Unity Catalog proxy mode. In this mode Graph requests are routed through
+   * a Databricks UC HTTP connection with a Databricks user token, so MSAL account
+   * resolution must be skipped exactly as in OAuth/HTTP bearer mode.
+   */
+  setUcProxyMode(enabled: boolean): void {
+    this.ucProxyMode = enabled;
   }
 
   /**

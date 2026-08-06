@@ -32,6 +32,7 @@ import { requestContext } from './request-context.js';
 import { dumpError } from './crash-logging.js';
 import crypto from 'node:crypto';
 import OboClient from './obo-client.js';
+import { getUcConnectionConfig, type UcConnectionConfig } from './uc-connection.js';
 
 /**
  * Parse HTTP option into host and port components.
@@ -77,6 +78,7 @@ class MicrosoftGraphServer {
   private server: McpServer | null;
   private secrets: AppSecrets | null;
   private oboClient: OboClient | null;
+  private ucConnection: UcConnectionConfig | null = null;
   private version: string = '0.0.0';
   private multiAccount: boolean = false;
   private accountNames: string[] = [];
@@ -163,6 +165,21 @@ class MicrosoftGraphServer {
     this.secrets = await getSecrets();
     this.version = version;
 
+    // Unity Catalog HTTP connection proxy mode. When enabled, Graph requests are
+    // routed through the UC connection with a Databricks user token instead of a
+    // Microsoft token, so MSAL/OBO are bypassed. Enabled via MS365_MCP_UC_CONNECTION.
+    this.ucConnection = getUcConnectionConfig();
+    if (this.ucConnection) {
+      // Report OAuth-like mode so account resolution is skipped everywhere the
+      // server would otherwise consult the MSAL cache (graph-tools token guards,
+      // account-routing detection). The request's Databricks token drives selection.
+      this.authManager.setUcProxyMode(true);
+      logger.info(
+        `Unity Catalog proxy mode enabled: connection "${this.ucConnection.connectionName}" ` +
+          `via ${this.ucConnection.workspaceHost}`
+      );
+    }
+
     // Detect multi-account mode and cache account names for schema enum.
     // Skip in HTTP bearer mode and BYOT: those requests are authenticated by the
     // client's OAuth bearer token, so MSAL-cached accounts can never serve them and
@@ -190,6 +207,13 @@ class MicrosoftGraphServer {
       );
     }
 
+    if (this.options.obo && this.ucConnection) {
+      throw new Error(
+        '--obo cannot be combined with Unity Catalog proxy mode (MS365_MCP_UC_CONNECTION): ' +
+          'both replace Microsoft token handling. Use one or the other.'
+      );
+    }
+
     if (this.options.obo) {
       if (!this.options.http) {
         throw new Error('--obo requires --http (On-Behalf-Of flow only works in HTTP mode).');
@@ -209,7 +233,12 @@ class MicrosoftGraphServer {
     }
 
     const outputFormat = this.options.toon ? 'toon' : 'json';
-    this.graphClient = new GraphClient(this.authManager, this.secrets, outputFormat);
+    this.graphClient = new GraphClient(
+      this.authManager,
+      this.secrets,
+      outputFormat,
+      this.ucConnection
+    );
 
     if (!this.options.http) {
       this.server = this.createMcpServer();
@@ -711,6 +740,7 @@ class MicrosoftGraphServer {
         trustProxyAuth: this.options.trustProxyAuth,
         allowUnauthenticatedDiscovery: this.options.allowUnauthenticatedDiscovery,
         publicUrl: publicBase,
+        ucMode: Boolean(this.ucConnection),
       });
       app.get(
         '/mcp',
