@@ -9,6 +9,7 @@
   },
   "scripts": {
     "generate": "node bin/generate-graph-client.mjs",
+    "prebuild": "node bin/ensure-generated-client.mjs",
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",

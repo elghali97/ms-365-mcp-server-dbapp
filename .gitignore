@@ -146,9 +146,7 @@ logs/
 
 openapi
 
-# NOTE: src/generated/client.ts is intentionally NOT ignored so it syncs to
-# Databricks Apps, where only `npm run build` runs (not `npm run generate`).
-# src/generated/client.ts
+src/generated/client.ts
 **/.claude/settings.local.json
 
 # Claude Code instructions file

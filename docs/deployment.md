@@ -99,9 +99,13 @@ These are committed so the platform build works — listed here so you understan
     [step 5](#5-grant-the-all-apis-scope-account-admin-one-time)).
   - `MS365_MCP_UC_CONNECTION` names the Unity Catalog connection and turns on proxy mode.
 
-- **`src/generated/client.ts` is committed** (not gitignored) — the platform build runs only `npm run build`, not
-  `npm run generate`, so the generated Graph client must be present or the app crashes at startup with
-  `ERR_MODULE_NOT_FOUND`.
+- **The generated Graph client is produced during the build.** `src/generated/client.ts` and `client-beta.ts` are
+  gitignored and created by `npm run generate` (download Graph OpenAPI specs → trim → `openapi-zod-client`). The
+  platform runs only `npm run build`, so a `prebuild` script (`bin/ensure-generated-client.mjs`) generates the clients
+  automatically **when they are missing** — self-sufficient on the platform, and a fast no-op locally/CI where they
+  already exist. Generation needs network egress (raw.githubusercontent.com for the specs and npm for
+  `npx openapi-zod-client`), available during the platform's install/build phase. Without this the app would crash at
+  startup with `ERR_MODULE_NOT_FOUND`.
 - **`tsup` is a runtime `dependency`** (not `devDependency`) — `NODE_ENV=production` skips dev dependencies, and the
   platform build needs `tsup`.
 

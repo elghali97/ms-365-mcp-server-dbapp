@@ -95,8 +95,9 @@ databricks account custom-app-integration update "$CLIENT_ID" -p <account-profil
 }'
 ```
 
-See [`docs/deployment.md`](docs/deployment.md#databricks-apps-deployment) for the full guide, including why
-`src/generated/client.ts` is committed, why `tsup` is a runtime dependency, and how `DATABRICKS_APP_PORT` is resolved.
+See [`docs/deployment.md`](docs/deployment.md#databricks-apps-deployment) for the full guide, including how the
+generated Graph client is produced by the `prebuild` step, why `tsup` is a runtime dependency, and how
+`DATABRICKS_APP_PORT` is resolved.
 
 ## App configuration (`app.yaml`)
 
