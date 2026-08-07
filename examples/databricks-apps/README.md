@@ -1,8 +1,9 @@
 # Databricks Apps deployment example
 
 > **Community-contributed example.** Adapt names, workspace, and scopes to your environment before production use. See
-> [`docs/deployment.md`](../../docs/deployment.md) for the full guide and [`README-databricks-apps.md`](../../README-databricks-apps.md)
-> for how clients consume the deployed server.
+> [`docs/deployment.md`](../../docs/deployment.md) for the full guide and the root
+> [README's "Deploy on Databricks Apps"](../../README.md#deploy-on-databricks-apps) section for how clients consume the
+> deployed server.
 
 Deploys `ms-365-mcp-server` to **Databricks Apps** in Streamable HTTP mode. Microsoft Graph calls are routed through a
 Unity Catalog HTTP connection (OAuth **U2M Per User**), so the app never handles Microsoft tokens and MSAL/OBO are

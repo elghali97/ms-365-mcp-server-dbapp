@@ -7,6 +7,203 @@ Microsoft 365 MCP Server
 A Model Context Protocol (MCP) server for interacting with Microsoft 365 and Microsoft Office services through the Graph
 API.
 
+> **This fork deploys the server as a custom MCP server on [Databricks Apps](#deploy-on-databricks-apps).** Microsoft
+> Graph calls are routed through a **Unity Catalog HTTP connection** (OAuth User-to-Machine, Per User), so the app holds
+> no Microsoft secret and each user acts with their own Graph identity. The upstream stdio / OAuth / OBO modes still
+> work unchanged and are documented further below.
+
+---
+
+# Deploy on Databricks Apps
+
+This is the primary use case for this repository: run `ms-365-mcp-server` as a **custom MCP server** hosted on Databricks
+Apps, and consume it from the Databricks AI Playground, Claude Code, or Cursor.
+
+## How it works
+
+```
+MCP clients (Databricks AI Playground, Claude Code, Cursor, ...)
+         │  Streamable HTTP (Databricks user identity)
+         ▼
+   ┌─────────────────────────────────────┐
+   │  ms-365-mcp-server (Databricks App)  │
+   │  --http $DATABRICKS_APP_PORT         │
+   │  MS365_MCP_UC_CONNECTION=<conn>      │
+   └─────────────┬───────────────────────┘
+                 │  x-forwarded-access-token (Databricks user token)
+                 ▼
+   ┌─────────────────────────────────────┐
+   │  Unity Catalog HTTP connection proxy │
+   │  OAuth U2M Per User → Microsoft Graph│  injects each user's Graph credentials
+   └─────────────┬───────────────────────┘
+                 ▼
+         Microsoft Graph API
+```
+
+The Databricks Apps platform terminates TLS, authenticates the user (SSO), and forwards the user's Databricks token to
+the app. The app forwards each request through the named Unity Catalog connection, which injects that user's own
+Microsoft Graph credentials. **MSAL / OBO are bypassed entirely** — no Azure app registration, client secret, or Key
+Vault is needed on the server; identity and token lifecycle are owned by Unity Catalog.
+
+## Deploy
+
+**Prerequisites**
+
+- Databricks CLI ≥ 0.229 authenticated to the target workspace
+  (`databricks auth login --host <workspace-url> --profile <profile>`).
+- A Unity Catalog **HTTP connection to Microsoft Graph** with OAuth **U2M Per User** credentials. Reuse a
+  system-managed SharePoint connection or create your own with custom Graph scopes — see
+  [Unity Catalog connection setup](docs/deployment.md#unity-catalog-connection-setup).
+- Account-admin access to grant the `all-apis` scope once (below).
+
+**Commands** (the app name **must start with `mcp-`** so the AI Playground auto-discovers it):
+
+```bash
+# 1. Create the app (provisions compute; ~1-2 min)
+databricks apps create mcp-m365-server \
+  --description "Microsoft 365 MCP server via Unity Catalog HTTP connection proxy" \
+  -p <profile>
+
+# 2. Sync the source into the workspace
+databricks sync . /Workspace/Users/<you@example.com>/mcp-m365-server -p <profile>
+
+# 3. Deploy (platform runs `npm install` + `npm run build`, then starts app.yaml's command)
+databricks apps deploy mcp-m365-server \
+  --source-code-path /Workspace/Users/<you@example.com>/mcp-m365-server \
+  -p <profile>
+
+# 4. Get the app URL + status
+databricks apps get mcp-m365-server -p <profile>
+```
+
+The MCP endpoint is `<app-url>/mcp`. A turnkey wrapper lives in [`examples/databricks-apps/`](examples/databricks-apps/).
+
+**One-time account-admin scope grant.** The Unity Catalog connection proxy requires the broad `all-apis` OAuth scope on
+the **forwarded user token**. The workspace `apps update` API rejects `all-apis`; it must be set on the account-level
+Custom OAuth App Integration:
+
+```bash
+CLIENT_ID=$(databricks apps get mcp-m365-server -p <profile> \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['oauth2_app_client_id'])")
+
+databricks auth login --host https://accounts.cloud.databricks.com --account-id <account-id> --profile <account-profile>
+
+# update OVERWRITES scopes — include the existing ones plus all-apis, and pre-consent for users
+databricks account custom-app-integration update "$CLIENT_ID" -p <account-profile> --json '{
+  "scopes": ["offline_access","email","iam.current-user:read","openid","iam.access-control:read","profile","all-apis"],
+  "user_authorized_scopes": ["all-apis"]
+}'
+```
+
+See [`docs/deployment.md`](docs/deployment.md#databricks-apps-deployment) for the full guide, including why
+`src/generated/client.ts` is committed, why `tsup` is a runtime dependency, and how `DATABRICKS_APP_PORT` is resolved.
+
+## App configuration (`app.yaml`)
+
+```yaml
+command: ['node', 'dist/index.js', '-v', '--http', 'DATABRICKS_APP_PORT', '--read-only']
+
+user_authorization:
+  scopes:
+    - all-apis
+
+env:
+  - name: 'NODE_ENV'
+    value: 'production'
+  - name: 'MS365_MCP_UC_CONNECTION'
+    value: 'system_ai_agent_sharepoint'
+```
+
+- `MS365_MCP_UC_CONNECTION` names the Unity Catalog connection and turns on proxy mode. Point it at your own connection
+  to use custom Graph scopes.
+- `--read-only` matches the read-only scopes on the SharePoint connection; drop it if your connection grants write
+  scopes.
+
+## Consume the deployed server
+
+The app is read-only by default. Each user needs **`USE CONNECTION`** on the underlying Unity Catalog Graph connection,
+and consents to Microsoft Graph access for their own account on first use.
+
+### Databricks AI Playground
+
+Runs in the same workspace and forwards your Databricks identity automatically — no tokens to copy.
+
+1. Confirm the app is deployed in the **same workspace** and its name starts with `mcp-`.
+2. Open **AI → Playground** and pick a model with **Tools enabled**.
+3. **Tools → + Add tool → MCP servers → Custom MCP Server**, then select your `mcp-…` app.
+4. Ask something that triggers a tool, e.g. _"What's my Microsoft 365 profile?"_ (`get-current-user`) or _"List my 5
+   most recent emails."_
+
+If the app doesn't appear: confirm it is running (`databricks apps get <app>`), its name starts with `mcp-`, and it is
+in the current workspace.
+
+### Claude Code
+
+The app is behind Databricks SSO, so pass a Databricks OAuth token as a bearer header.
+
+```bash
+# token for the workspace hosting the app
+databricks auth token -p <profile> | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])"
+```
+
+```bash
+claude mcp add ms365 \
+  --transport http \
+  https://mcp-m365-server-<number>.<region>.databricksapps.com/mcp \
+  --header "Authorization: Bearer <databricks-token>"
+```
+
+Then `/mcp` in Claude Code to confirm the connection.
+
+> Databricks tokens are short-lived; refresh with `databricks auth token` and re-add the server when calls start
+> returning `401`. For a hands-off setup, use the AI Playground or a governed external-MCP proxy registration (below).
+
+### Cursor
+
+Add an HTTP server to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-project):
+
+```json
+{
+  "mcpServers": {
+    "ms365": {
+      "url": "https://mcp-m365-server-<number>.<region>.databricksapps.com/mcp",
+      "headers": {
+        "Authorization": "Bearer <databricks-token>"
+      }
+    }
+  }
+}
+```
+
+Get `<databricks-token>` with `databricks auth token -p <profile>` (as above), then reload Cursor or toggle the server
+in **Settings → MCP**.
+
+### Optional: governed external MCP (stable URL, no token juggling)
+
+Instead of each client carrying a Databricks token, an admin can register the app as an **external MCP** through Unity
+Catalog / AI Gateway. Clients then call a stable workspace proxy URL and the Gateway handles auth:
+
+```
+https://<workspace-host>/api/2.0/mcp/external/<connection-name>
+```
+
+See the Databricks docs for _Register an external MCP server_ and point it at `<app-url>/mcp`.
+
+## Troubleshooting
+
+| Symptom                                             | Cause / fix                                                                                                             |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `401` from the app                                  | Databricks token missing/expired — refresh it (`databricks auth token`).                                                |
+| `403 ... required scopes: all-apis`                 | The app's account integration is missing the `all-apis` scope — an account admin must grant it (above).                 |
+| `USE CONNECTION` / permission denied from the proxy | You lack `USE CONNECTION` on the UC Graph connection — ask the deployer to grant it.                                    |
+| Tool call returns a Microsoft Graph `403`           | The connection's Graph scopes don't cover that call (e.g. a write on a read-only connection), or you haven't consented. |
+| App not listed in the AI Playground                 | App name must start with `mcp-`, be running, and live in the same workspace.                                            |
+
+---
+
+The remainder of this document covers the upstream server: features, tools, the non-Databricks (stdio / direct OAuth)
+integrations, and full configuration reference.
+
 ## Supported Clouds
 
 This server supports multiple Microsoft cloud environments:
@@ -222,10 +419,8 @@ Test login in Claude Desktop:
 
 ## Integration
 
-> **Deploying on Databricks Apps?** See [`docs/deployment.md`](docs/deployment.md) to deploy the server behind a Unity
-> Catalog HTTP connection proxy (per-user Microsoft Graph, no MSAL/secrets on the server), and
-> [`README-databricks-apps.md`](README-databricks-apps.md) to consume it from the Databricks AI Playground, Cursor, and
-> Claude Code.
+> **Deploying on Databricks Apps?** See [Deploy on Databricks Apps](#deploy-on-databricks-apps) above. The integrations
+> below cover the upstream stdio / direct-OAuth modes.
 
 ### Claude Desktop
 

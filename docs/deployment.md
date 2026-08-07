@@ -397,8 +397,8 @@ to round-trip back through the public URL.
 
 ## Client Configuration
 
-See the root [`README-databricks-apps.md`](../README-databricks-apps.md) for consuming a Databricks-Apps-hosted server
-from the AI Playground, Cursor, and Claude Code.
+See the root [README's "Deploy on Databricks Apps"](../README.md#deploy-on-databricks-apps) section for consuming a
+Databricks-Apps-hosted server from the AI Playground, Cursor, and Claude Code.
 
 For a **Direct OAuth** deployment, users point their MCP client at the server URL and the client discovers OAuth
 endpoints automatically:
