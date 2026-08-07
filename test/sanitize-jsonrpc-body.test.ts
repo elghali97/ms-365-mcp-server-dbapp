@@ -55,6 +55,28 @@ describe('sanitizeJsonRpcBody', () => {
     });
   });
 
+  it('drops params entirely when it is null (playground tools/list)', () => {
+    const toolsListNullParams = {
+      jsonrpc: '2.0',
+      id: 1786094255,
+      method: 'tools/list',
+      params: null,
+      catalog: null,
+      schema: null,
+      functionName: null,
+      indexName: null,
+      genieSpaceId: null,
+      connectionName: null,
+      repoId: null,
+      workspacePath: null,
+    };
+    expect(sanitizeJsonRpcBody(toolsListNullParams)).toEqual({
+      jsonrpc: '2.0',
+      id: 1786094255,
+      method: 'tools/list',
+    });
+  });
+
   it('preserves real non-null params such as a tool call name/arguments', () => {
     const toolCall = {
       jsonrpc: '2.0',

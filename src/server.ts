@@ -62,17 +62,24 @@ export function sanitizeJsonRpcBody(body: unknown): unknown {
       )
     ) as Record<string, unknown>;
 
-    // 2) Within params, drop every key whose value is null. The playground injects null
-    //    placeholders (name, arguments, cursor, uri, _meta) into params on every method,
-    //    and MCP's reserved typed fields (_meta, cursor, uri, progressToken) reject an
-    //    explicit null under the SDK's strict schema. A null param carries no value, so
-    //    removing it is safe; real non-null params (e.g. a tool call's name/arguments)
-    //    are preserved untouched, including nested nulls inside a tool's arguments object.
-    const params = cleaned.params;
-    if (params && typeof params === 'object' && !Array.isArray(params)) {
-      cleaned.params = Object.fromEntries(
-        Object.entries(params as Record<string, unknown>).filter(([, value]) => value !== null)
-      );
+    // 2) Normalize params. The playground sends params in shapes the SDK's strict schema
+    //    rejects:
+    //     - `params: null` (e.g. on tools/list) — the schema wants an object or no params,
+    //       so drop the key entirely.
+    //     - an object with null placeholders (name, arguments, cursor, uri, _meta) injected
+    //       on every method — MCP's reserved typed fields (_meta, cursor, uri,
+    //       progressToken) reject an explicit null, so drop the null-valued keys.
+    //    Real non-null params (e.g. a tool call's name/arguments, and nested nulls inside a
+    //    tool's arguments object) are preserved untouched.
+    if ('params' in cleaned) {
+      const params = cleaned.params;
+      if (params === null) {
+        delete cleaned.params;
+      } else if (typeof params === 'object' && !Array.isArray(params)) {
+        cleaned.params = Object.fromEntries(
+          Object.entries(params as Record<string, unknown>).filter(([, value]) => value !== null)
+        );
+      }
     }
     return cleaned;
   };
