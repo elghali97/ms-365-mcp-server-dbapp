@@ -222,6 +222,11 @@ Test login in Claude Desktop:
 
 ## Integration
 
+> **Deploying on Databricks Apps?** See [`docs/deployment.md`](docs/deployment.md) to deploy the server behind a Unity
+> Catalog HTTP connection proxy (per-user Microsoft Graph, no MSAL/secrets on the server), and
+> [`README-databricks-apps.md`](README-databricks-apps.md) to consume it from the Databricks AI Playground, Cursor, and
+> Claude Code.
+
 ### Claude Desktop
 
 To add this MCP server to Claude Desktop, edit the config file under Settings > Developer.
