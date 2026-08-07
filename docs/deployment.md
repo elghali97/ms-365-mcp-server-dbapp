@@ -106,8 +106,14 @@ These are committed so the platform build works — listed here so you understan
   already exist. Generation needs network egress (raw.githubusercontent.com for the specs and npm for
   `npx openapi-zod-client`), available during the platform's install/build phase. Without this the app would crash at
   startup with `ERR_MODULE_NOT_FOUND`.
-- **`tsup` is a runtime `dependency`** (not `devDependency`) — `NODE_ENV=production` skips dev dependencies, and the
-  platform build needs `tsup`.
+- **`tsup` and `openapi-zod-client` are runtime `dependencies`** (not `devDependencies`) — `NODE_ENV=production` skips
+  dev dependencies, and both the build (`tsup`) and the prebuild generation (`openapi-zod-client`) need them. The
+  generators invoke these tools' resolved bins directly rather than via `npx`, which is not on the Databricks build
+  shell's PATH.
+- **`package-lock.json` is intentionally not committed.** The Databricks Apps build installs against a restricted npm
+  mirror (`npm-proxy.cloud.databricks.com`) that does not host every exact version a committed lockfile would pin (for
+  example `yaml@2.9.0` → 404), which fails `npm install`. Omitting the lockfile lets npm resolve fresh against whatever
+  the proxy mirrors. Local development still gets a lockfile from `npm install`; it is just gitignored.
 
 ## Deploy
 
