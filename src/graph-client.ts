@@ -11,6 +11,7 @@ import {
 } from './lib/graph-resilience.js';
 import { open, stat, unlink } from 'fs/promises';
 import { pipeline } from 'stream/promises';
+import { buildUcProxyUrl, type UcConnectionConfig } from './uc-connection.js';
 
 /**
  * Returns true if the given HTTP Content-Type header indicates a binary
@@ -90,21 +91,39 @@ class GraphClient {
   private authManager: AuthManager;
   private secrets: AppSecrets;
   private readonly outputFormat: 'json' | 'toon' = 'json';
+  // When set, Graph requests are routed through a Databricks Unity Catalog HTTP
+  // connection proxy using a Databricks user token, instead of being sent to
+  // graph.microsoft.com with a Microsoft token. See src/uc-connection.ts.
+  private readonly ucConnection: UcConnectionConfig | null;
 
   constructor(
     authManager: AuthManager,
     secrets: AppSecrets,
-    outputFormat: 'json' | 'toon' = 'json'
+    outputFormat: 'json' | 'toon' = 'json',
+    ucConnection: UcConnectionConfig | null = null
   ) {
     this.authManager = authManager;
     this.secrets = secrets;
     this.outputFormat = outputFormat;
+    this.ucConnection = ucConnection;
+  }
+
+  /**
+   * Resolves the bearer token for a Graph request. In UC proxy mode this is the
+   * Databricks user token (per-request context, else the configured fallback);
+   * MSAL is never consulted since the proxy holds the Microsoft credentials. In
+   * direct mode it is the Microsoft token from options/context/MSAL, as before.
+   */
+  private async resolveAccessToken(options: GraphRequestOptions): Promise<string | null> {
+    const contextTokens = getRequestTokens();
+    if (this.ucConnection) {
+      return contextTokens?.accessToken ?? this.ucConnection.fallbackToken ?? null;
+    }
+    return options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
   }
 
   async makeRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<unknown> {
-    const contextTokens = getRequestTokens();
-    const accessToken =
-      options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+    const accessToken = await this.resolveAccessToken(options);
 
     if (!accessToken) {
       throw new Error('No access token available');
@@ -205,9 +224,7 @@ class GraphClient {
     let completed = false;
 
     try {
-      const contextTokens = getRequestTokens();
-      const accessToken =
-        options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+      const accessToken = await this.resolveAccessToken(options);
       if (!accessToken) {
         throw new Error('No access token available');
       }
@@ -266,11 +283,20 @@ class GraphClient {
     accessToken: string,
     options: GraphRequestOptions
   ): Promise<Response> {
-    const cloudEndpoints = getCloudEndpoints(this.secrets.cloudType);
     const apiVersion = options.apiVersion || 'v1.0';
-    const url = `${cloudEndpoints.graphApi}/${apiVersion}${endpoint}`;
+    const graphPath = `/${apiVersion}${endpoint}`;
 
-    logger.info(`[GRAPH CLIENT] Final URL being sent to Microsoft: ${url}`);
+    // UC proxy mode: send to the Unity Catalog HTTP connection proxy with the
+    // Databricks user token. The proxy injects the user's Microsoft Graph
+    // credentials and forwards to graph.microsoft.com, so no Microsoft token is
+    // used here. Direct mode: send to graph.microsoft.com with a Microsoft token.
+    const url = this.ucConnection
+      ? buildUcProxyUrl(this.ucConnection, graphPath)
+      : `${getCloudEndpoints(this.secrets.cloudType).graphApi}/${apiVersion}${endpoint}`;
+
+    logger.info(
+      `[GRAPH CLIENT] Final URL being sent ${this.ucConnection ? 'via UC proxy' : 'to Microsoft'}: ${url}`
+    );
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,

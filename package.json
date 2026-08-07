@@ -9,6 +9,7 @@
   },
   "scripts": {
     "generate": "node bin/generate-graph-client.mjs",
+    "prebuild": "node bin/ensure-generated-client.mjs",
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -43,6 +44,8 @@
     "helmet": "^8.1.0",
     "js-yaml": "^4.1.0",
     "open": "^11.0.0",
+    "openapi-zod-client": "^1.18.3",
+    "tsup": "^8.5.0",
     "winston": "^3.17.0",
     "zod": "^3.24.2",
     "zod-to-json-schema": "^3.25.1"
@@ -67,7 +70,6 @@
     "globals": "^16.3.0",
     "prettier": "^3.5.3",
     "semantic-release": "^25.0.2",
-    "tsup": "^8.5.0",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "vitest": "^4.1.8"

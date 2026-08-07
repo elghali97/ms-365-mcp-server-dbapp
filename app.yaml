@@ -1,0 +1,24 @@
+command: ["node", "dist/index.js", "-v", "--http", "DATABRICKS_APP_PORT", "--read-only"]
+
+# User authorization forwards each end user's Databricks token to the app in the
+# x-forwarded-access-token header. The app uses it to call the Unity Catalog HTTP
+# connection proxy, which injects that user's own Microsoft Graph credentials.
+# The connection proxy endpoint requires the broad `all-apis` scope; narrower
+# scopes (e.g. catalog.connections) are rejected by the proxy with
+# "Invalid scope, required scopes: all-apis". `all-apis` must be granted on the
+# account-level Custom OAuth App Integration (databricks account
+# custom-app-integration), not just here. Scope down later once the proxy
+# accepts a narrower grant. Each user must also hold USE CONNECTION on the
+# connection below.
+user_authorization:
+  scopes:
+    - all-apis
+
+env:
+  - name: "NODE_ENV"
+    value: "production"
+  # Enables Unity Catalog proxy mode. Presence of a connection name activates it;
+  # Graph requests then route through this connection instead of graph.microsoft.com,
+  # and MSAL/OAuth are bypassed entirely.
+  - name: "MS365_MCP_UC_CONNECTION"
+    value: "system_ai_agent_sharepoint"

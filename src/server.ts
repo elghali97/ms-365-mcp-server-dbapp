@@ -32,6 +32,59 @@ import { requestContext } from './request-context.js';
 import { dumpError } from './crash-logging.js';
 import crypto from 'node:crypto';
 import OboClient from './obo-client.js';
+import { getUcConnectionConfig, type UcConnectionConfig } from './uc-connection.js';
+
+// Keys that belong to a JSON-RPC 2.0 envelope. The MCP SDK validates incoming
+// messages with a strict schema, so any extra top-level key makes the whole
+// request fail with "-32700 Parse error: Invalid JSON-RPC message".
+const JSON_RPC_ENVELOPE_KEYS = new Set(['jsonrpc', 'id', 'method', 'params', 'result', 'error']);
+
+/**
+ * Strips non-JSON-RPC top-level keys from an incoming MCP request body. The
+ * Databricks Apps playground MCP client sends its own extra fields alongside the
+ * JSON-RPC envelope (e.g. catalog, schema, functionName, genieSpaceId,
+ * connectionName, and nulls like name/arguments/cursor), which the SDK's strict
+ * JSONRPCMessageSchema rejects. Keeping only the envelope keys makes such requests
+ * valid without altering well-formed ones. Applies element-wise to batches and
+ * leaves non-object bodies untouched.
+ */
+export function sanitizeJsonRpcBody(body: unknown): unknown {
+  const pruneOne = (msg: unknown): unknown => {
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+      return msg;
+    }
+    // 1) Keep only JSON-RPC envelope keys at the top level, dropping the playground's
+    //    extras (catalog, schema, functionName, indexName, genieSpaceId, connectionName,
+    //    repoId, workspacePath, ...).
+    const cleaned = Object.fromEntries(
+      Object.entries(msg as Record<string, unknown>).filter(([key]) =>
+        JSON_RPC_ENVELOPE_KEYS.has(key)
+      )
+    ) as Record<string, unknown>;
+
+    // 2) Normalize params. The playground sends params in shapes the SDK's strict schema
+    //    rejects:
+    //     - `params: null` (e.g. on tools/list) — the schema wants an object or no params,
+    //       so drop the key entirely.
+    //     - an object with null placeholders (name, arguments, cursor, uri, _meta) injected
+    //       on every method — MCP's reserved typed fields (_meta, cursor, uri,
+    //       progressToken) reject an explicit null, so drop the null-valued keys.
+    //    Real non-null params (e.g. a tool call's name/arguments, and nested nulls inside a
+    //    tool's arguments object) are preserved untouched.
+    if ('params' in cleaned) {
+      const params = cleaned.params;
+      if (params === null) {
+        delete cleaned.params;
+      } else if (typeof params === 'object' && !Array.isArray(params)) {
+        cleaned.params = Object.fromEntries(
+          Object.entries(params as Record<string, unknown>).filter(([, value]) => value !== null)
+        );
+      }
+    }
+    return cleaned;
+  };
+  return Array.isArray(body) ? body.map(pruneOne) : pruneOne(body);
+}
 
 /**
  * Parse HTTP option into host and port components.
@@ -44,7 +97,18 @@ function parseHttpOption(httpOption: string | boolean): { host: string | undefin
     return { host: undefined, port: 3000 };
   }
 
-  const httpString = httpOption.trim();
+  let httpString = httpOption.trim();
+
+  // Databricks Apps inject the runtime port via the DATABRICKS_APP_PORT env var and
+  // are supposed to substitute the literal token in the command array — but that
+  // substitution is unreliable (the token can reach the process verbatim). When we
+  // receive the literal token (or the "host:DATABRICKS_APP_PORT" form), resolve the
+  // real port from the environment so the server binds where the platform proxy
+  // forwards. Falls back to 3000 only if the env var is unset.
+  if (httpString.includes('DATABRICKS_APP_PORT')) {
+    const injectedPort = process.env.DATABRICKS_APP_PORT?.trim();
+    httpString = httpString.replace('DATABRICKS_APP_PORT', injectedPort || '3000');
+  }
 
   // Check if it contains a colon (host:port format)
   if (httpString.includes(':')) {
@@ -66,6 +130,7 @@ class MicrosoftGraphServer {
   private server: McpServer | null;
   private secrets: AppSecrets | null;
   private oboClient: OboClient | null;
+  private ucConnection: UcConnectionConfig | null = null;
   private version: string = '0.0.0';
   private multiAccount: boolean = false;
   private accountNames: string[] = [];
@@ -152,6 +217,21 @@ class MicrosoftGraphServer {
     this.secrets = await getSecrets();
     this.version = version;
 
+    // Unity Catalog HTTP connection proxy mode. When enabled, Graph requests are
+    // routed through the UC connection with a Databricks user token instead of a
+    // Microsoft token, so MSAL/OBO are bypassed. Enabled via MS365_MCP_UC_CONNECTION.
+    this.ucConnection = getUcConnectionConfig();
+    if (this.ucConnection) {
+      // Report OAuth-like mode so account resolution is skipped everywhere the
+      // server would otherwise consult the MSAL cache (graph-tools token guards,
+      // account-routing detection). The request's Databricks token drives selection.
+      this.authManager.setUcProxyMode(true);
+      logger.info(
+        `Unity Catalog proxy mode enabled: connection "${this.ucConnection.connectionName}" ` +
+          `via ${this.ucConnection.workspaceHost}`
+      );
+    }
+
     // Detect multi-account mode and cache account names for schema enum.
     // Skip in HTTP bearer mode and BYOT: those requests are authenticated by the
     // client's OAuth bearer token, so MSAL-cached accounts can never serve them and
@@ -179,6 +259,13 @@ class MicrosoftGraphServer {
       );
     }
 
+    if (this.options.obo && this.ucConnection) {
+      throw new Error(
+        '--obo cannot be combined with Unity Catalog proxy mode (MS365_MCP_UC_CONNECTION): ' +
+          'both replace Microsoft token handling. Use one or the other.'
+      );
+    }
+
     if (this.options.obo) {
       if (!this.options.http) {
         throw new Error('--obo requires --http (On-Behalf-Of flow only works in HTTP mode).');
@@ -198,7 +285,12 @@ class MicrosoftGraphServer {
     }
 
     const outputFormat = this.options.toon ? 'toon' : 'json';
-    this.graphClient = new GraphClient(this.authManager, this.secrets, outputFormat);
+    this.graphClient = new GraphClient(
+      this.authManager,
+      this.secrets,
+      outputFormat,
+      this.ucConnection
+    );
 
     if (!this.options.http) {
       this.server = this.createMcpServer();
@@ -258,7 +350,13 @@ class MicrosoftGraphServer {
         })
       );
 
-      app.use(express.json());
+      // Parse JSON bodies. `type: () => true` makes the parser run regardless of the
+      // request Content-Type. The Databricks Apps gateway (and some MCP clients) forward
+      // the JSON-RPC initialize body without a strict `application/json` Content-Type; with
+      // the default type matcher express.json() would skip parsing, leaving req.body empty
+      // and the MCP transport would reject it with "-32700 Parse error: Invalid JSON". An
+      // empty/GET body still yields {} here, which is harmless.
+      app.use(express.json({ type: () => true }));
       app.use(express.urlencoded({ extended: true }));
 
       // Add CORS headers for all routes
@@ -700,15 +798,26 @@ class MicrosoftGraphServer {
         trustProxyAuth: this.options.trustProxyAuth,
         allowUnauthenticatedDiscovery: this.options.allowUnauthenticatedDiscovery,
         publicUrl: publicBase,
+        ucMode: Boolean(this.ucConnection),
       });
+      // Serve the MCP endpoint on both /mcp (direct clients) and /mcp/mcp. When a
+      // Databricks App is registered as a custom MCP server, the platform appends
+      // /mcp to the app's configured MCP path and POSTs to /mcp/mcp; without this
+      // alias that request 404s with an HTML body the MCP client cannot parse.
+      const mcpPaths = ['/mcp', '/mcp/mcp'];
       app.get(
-        '/mcp',
+        mcpPaths,
         mcpAuth,
         async (req: Request & { microsoftAuth?: { accessToken: string } }, res: Response) => {
           const handler = async () => {
             const server = this.createMcpServer();
             const transport = new StreamableHTTPServerTransport({
               sessionIdGenerator: undefined, // Stateless mode
+              // Return a single application/json response instead of an SSE stream.
+              // The Databricks Apps MCP client sends Accept: text/event-stream but its
+              // parser expects a plain JSON-RPC object; the SSE framing (event:/data:)
+              // makes it fail with "-32700 Parse error: Invalid JSON-RPC message".
+              enableJsonResponse: true,
             });
 
             res.on('close', () => {
@@ -747,13 +856,18 @@ class MicrosoftGraphServer {
       );
 
       app.post(
-        '/mcp',
+        mcpPaths,
         mcpAuth,
         async (req: Request & { microsoftAuth?: { accessToken: string } }, res: Response) => {
           const handler = async () => {
             const server = this.createMcpServer();
             const transport = new StreamableHTTPServerTransport({
               sessionIdGenerator: undefined, // Stateless mode
+              // Return a single application/json response instead of an SSE stream.
+              // The Databricks Apps MCP client sends Accept: text/event-stream but its
+              // parser expects a plain JSON-RPC object; the SSE framing (event:/data:)
+              // makes it fail with "-32700 Parse error: Invalid JSON-RPC message".
+              enableJsonResponse: true,
             });
 
             res.on('close', () => {
@@ -762,7 +876,10 @@ class MicrosoftGraphServer {
             });
 
             await server.connect(transport);
-            await transport.handleRequest(req as any, res as any, req.body);
+            // Pass a sanitized body so extra non-JSON-RPC top-level fields sent by some
+            // MCP clients (e.g. the Databricks playground) don't trip the SDK's strict
+            // envelope validation and fail the request with -32700.
+            await transport.handleRequest(req as any, res as any, sanitizeJsonRpcBody(req.body));
           };
 
           try {

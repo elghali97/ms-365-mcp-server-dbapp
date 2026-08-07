@@ -94,6 +94,16 @@ export const microsoftBearerTokenAuthMiddleware =
       trustProxyAuth?: boolean;
       allowUnauthenticatedDiscovery?: boolean;
       publicUrl?: string | null;
+      /**
+       * Unity Catalog proxy mode. The bearer token is a *Databricks* user token,
+       * not a Microsoft token. In a deployed Databricks App with user authorization
+       * it arrives via the x-forwarded-access-token header; for local runs it may be
+       * passed in the Authorization header instead. Either is placed on
+       * req.microsoftAuth.accessToken so the /mcp handler forwards it to the proxy.
+       * When neither is present, the request still proceeds so the GraphClient can
+       * fall back to its configured Databricks token (DATABRICKS_TOKEN).
+       */
+      ucMode?: boolean;
     } = {}
   ) =>
   (
@@ -101,6 +111,20 @@ export const microsoftBearerTokenAuthMiddleware =
     res: Response,
     next: NextFunction
   ): void => {
+    if (opts.ucMode) {
+      const forwarded = req.headers['x-forwarded-access-token'];
+      const forwardedToken = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+      const authHeader = req.headers.authorization;
+      const headerToken =
+        authHeader && authHeader.startsWith('Bearer ') ? authHeader.substring(7) : undefined;
+      const dbToken = forwardedToken || headerToken;
+      if (dbToken) {
+        req.microsoftAuth = { accessToken: dbToken };
+      }
+      next();
+      return;
+    }
+
     if (opts.trustProxyAuth) {
       next();
       return;

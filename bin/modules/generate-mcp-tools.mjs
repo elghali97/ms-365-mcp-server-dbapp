@@ -1,6 +1,39 @@
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import { createRequire } from 'module';
+import { execFileSync } from 'child_process';
+
+const require = createRequire(import.meta.url);
+
+// Resolve the openapi-zod-client CLI entrypoint from the installed dependency instead
+// of shelling out to `npx`. The Databricks Apps build shell does not have `npx` on its
+// PATH, so `npx -y openapi-zod-client` fails there with "npx: not found". Running the
+// package's own bin script through the current Node binary is PATH-independent and
+// avoids an on-the-fly npm fetch. openapi-zod-client is a direct dependency for this.
+function resolveOpenapiZodClientBin() {
+  const pkgJsonPath = require.resolve('openapi-zod-client/package.json');
+  const pkgDir = path.dirname(pkgJsonPath);
+  const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+  const binRel = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.['openapi-zod-client'];
+  if (!binRel) {
+    throw new Error('Could not locate the openapi-zod-client bin entry in its package.json');
+  }
+  return path.join(pkgDir, binRel);
+}
+
+// Resolve the prettier CLI from the installed devDependency, or return null when it is
+// not installed (production install). PATH-independent, like the client bin resolver.
+function tryResolvePrettierBin() {
+  try {
+    const pkgJsonPath = require.resolve('prettier/package.json');
+    const pkgDir = path.dirname(pkgJsonPath);
+    const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+    const binRel = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.prettier;
+    return binRel ? path.join(pkgDir, binRel) : null;
+  } catch {
+    return null;
+  }
+}
 
 export function generateMcpTools(openapiTrimmedFile, clientFilePath) {
   try {
@@ -14,8 +47,17 @@ export function generateMcpTools(openapiTrimmedFile, clientFilePath) {
       console.log(`Created directory: ${outputDir}`);
     }
 
-    execSync(
-      `npx -y openapi-zod-client "${openapiTrimmedFile}" -o "${clientFilePath}" --with-description --strict-objects --additional-props-default-value=false`,
+    execFileSync(
+      process.execPath,
+      [
+        resolveOpenapiZodClientBin(),
+        openapiTrimmedFile,
+        '-o',
+        clientFilePath,
+        '--with-description',
+        '--strict-objects',
+        '--additional-props-default-value=false',
+      ],
       {
         stdio: 'inherit',
       }
@@ -60,8 +102,18 @@ export function generateMcpTools(openapiTrimmedFile, clientFilePath) {
 
     // Format the generated client so `npm run generate` output is prettier-stable and
     // the format:check step in `npm run verify` passes deterministically across versions.
-    console.log('Formatting generated client with Prettier...');
-    execSync(`npx prettier --write "${clientFilePath}"`, { stdio: 'inherit' });
+    // Best-effort: prettier is a devDependency, so it is absent on a production install
+    // (e.g. the Databricks Apps build with NODE_ENV=production). Formatting only matters
+    // for the committed-free local/CI flow, so skip it when prettier can't be resolved.
+    const prettierBin = tryResolvePrettierBin();
+    if (prettierBin) {
+      console.log('Formatting generated client with Prettier...');
+      execFileSync(process.execPath, [prettierBin, '--write', clientFilePath], {
+        stdio: 'inherit',
+      });
+    } else {
+      console.log('Prettier not installed; skipping generated-client formatting.');
+    }
 
     return true;
   } catch (error) {
