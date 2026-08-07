@@ -34,6 +34,51 @@ import crypto from 'node:crypto';
 import OboClient from './obo-client.js';
 import { getUcConnectionConfig, type UcConnectionConfig } from './uc-connection.js';
 
+// Keys that belong to a JSON-RPC 2.0 envelope. The MCP SDK validates incoming
+// messages with a strict schema, so any extra top-level key makes the whole
+// request fail with "-32700 Parse error: Invalid JSON-RPC message".
+const JSON_RPC_ENVELOPE_KEYS = new Set(['jsonrpc', 'id', 'method', 'params', 'result', 'error']);
+
+/**
+ * Strips non-JSON-RPC top-level keys from an incoming MCP request body. The
+ * Databricks Apps playground MCP client sends its own extra fields alongside the
+ * JSON-RPC envelope (e.g. catalog, schema, functionName, genieSpaceId,
+ * connectionName, and nulls like name/arguments/cursor), which the SDK's strict
+ * JSONRPCMessageSchema rejects. Keeping only the envelope keys makes such requests
+ * valid without altering well-formed ones. Applies element-wise to batches and
+ * leaves non-object bodies untouched.
+ */
+export function sanitizeJsonRpcBody(body: unknown): unknown {
+  const pruneOne = (msg: unknown): unknown => {
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+      return msg;
+    }
+    // 1) Keep only JSON-RPC envelope keys at the top level, dropping the playground's
+    //    extras (catalog, schema, functionName, indexName, genieSpaceId, connectionName,
+    //    repoId, workspacePath, ...).
+    const cleaned = Object.fromEntries(
+      Object.entries(msg as Record<string, unknown>).filter(([key]) =>
+        JSON_RPC_ENVELOPE_KEYS.has(key)
+      )
+    ) as Record<string, unknown>;
+
+    // 2) Within params, drop every key whose value is null. The playground injects null
+    //    placeholders (name, arguments, cursor, uri, _meta) into params on every method,
+    //    and MCP's reserved typed fields (_meta, cursor, uri, progressToken) reject an
+    //    explicit null under the SDK's strict schema. A null param carries no value, so
+    //    removing it is safe; real non-null params (e.g. a tool call's name/arguments)
+    //    are preserved untouched, including nested nulls inside a tool's arguments object.
+    const params = cleaned.params;
+    if (params && typeof params === 'object' && !Array.isArray(params)) {
+      cleaned.params = Object.fromEntries(
+        Object.entries(params as Record<string, unknown>).filter(([, value]) => value !== null)
+      );
+    }
+    return cleaned;
+  };
+  return Array.isArray(body) ? body.map(pruneOne) : pruneOne(body);
+}
+
 /**
  * Parse HTTP option into host and port components.
  * Supports formats: "host:port", ":port", "port"
@@ -761,6 +806,11 @@ class MicrosoftGraphServer {
             const server = this.createMcpServer();
             const transport = new StreamableHTTPServerTransport({
               sessionIdGenerator: undefined, // Stateless mode
+              // Return a single application/json response instead of an SSE stream.
+              // The Databricks Apps MCP client sends Accept: text/event-stream but its
+              // parser expects a plain JSON-RPC object; the SSE framing (event:/data:)
+              // makes it fail with "-32700 Parse error: Invalid JSON-RPC message".
+              enableJsonResponse: true,
             });
 
             res.on('close', () => {
@@ -806,6 +856,11 @@ class MicrosoftGraphServer {
             const server = this.createMcpServer();
             const transport = new StreamableHTTPServerTransport({
               sessionIdGenerator: undefined, // Stateless mode
+              // Return a single application/json response instead of an SSE stream.
+              // The Databricks Apps MCP client sends Accept: text/event-stream but its
+              // parser expects a plain JSON-RPC object; the SSE framing (event:/data:)
+              // makes it fail with "-32700 Parse error: Invalid JSON-RPC message".
+              enableJsonResponse: true,
             });
 
             res.on('close', () => {
@@ -814,7 +869,10 @@ class MicrosoftGraphServer {
             });
 
             await server.connect(transport);
-            await transport.handleRequest(req as any, res as any, req.body);
+            // Pass a sanitized body so extra non-JSON-RPC top-level fields sent by some
+            // MCP clients (e.g. the Databricks playground) don't trip the SDK's strict
+            // envelope validation and fail the request with -32700.
+            await transport.handleRequest(req as any, res as any, sanitizeJsonRpcBody(req.body));
           };
 
           try {

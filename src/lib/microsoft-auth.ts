@@ -118,22 +118,6 @@ export const microsoftBearerTokenAuthMiddleware =
       const headerToken =
         authHeader && authHeader.startsWith('Bearer ') ? authHeader.substring(7) : undefined;
       const dbToken = forwardedToken || headerToken;
-      // TEMP DIAGNOSTIC (UC mode): log which token source is present and its
-      // scope/aud claims, without logging the token itself. Remove once verified.
-      const describe = (tok?: string): string => {
-        if (!tok) return 'none';
-        const parts = tok.split('.');
-        if (parts.length !== 3) return 'opaque';
-        try {
-          const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
-          return `scope="${payload.scope ?? payload.scp ?? '?'}" aud=${JSON.stringify(payload.aud)}`;
-        } catch {
-          return 'unparseable';
-        }
-      };
-      logger.info(
-        `[UC AUTH] x-forwarded-access-token: ${describe(forwardedToken)} | authorization: ${describe(headerToken)} | using: ${forwardedToken ? 'forwarded' : headerToken ? 'header' : 'none(fallback)'}`
-      );
       if (dbToken) {
         req.microsoftAuth = { accessToken: dbToken };
       }
