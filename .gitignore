@@ -1,3 +1,6 @@
+# Databricks CLI sync snapshots
+.databricks/
+
 # Logs
 logs
 *.log
